@@ -28,3 +28,7 @@ Thumbs.db
 __pycache__/
 *.pyc
 sources/*.py
+
+# temp scripts
+/*.py
+
