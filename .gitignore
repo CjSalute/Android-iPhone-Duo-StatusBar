@@ -1,0 +1,30 @@
+# 签名密钥，绝不入库
+*.jks
+*.keystore
+*.p12
+*.pfx
+
+# 构建产物
+build/
+sources/build/
+*.idsig
+*.apk.idsig
+
+# SDK / 反编译工作区
+sdk/
+sysui/
+cap/
+tools/
+*.zip
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+
+# Python 临时脚本
+__pycache__/
+*.pyc
+sources/*.py
