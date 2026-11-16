@@ -68,7 +68,8 @@ public final class Injector {
             @Override public void run() {
                 try {
                     Cfg.maybeReload();
-                    data.refreshFallback();
+                    // 系统服务查询放后台线程：主线程只做绘制
+                    if ((tickCount % 2) == 0) WORKER.execute(REFRESH);
                     ArrayList<View> roots = snapshotRoots();
                     colorRank = -1;
                     for (View r : roots) {
@@ -81,6 +82,12 @@ public final class Injector {
             }
         }, 500);
     }
+
+    private static final java.util.concurrent.ExecutorService WORKER =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
+    private static final Runnable REFRESH = new Runnable() {
+        @Override public void run() { try { data.refreshFallback(); } catch (Throwable ignored) {} }
+    };
 
     private static ArrayList<View> snapshotRoots() {
         ArrayList<View> out = new ArrayList<View>();
@@ -203,16 +210,48 @@ public final class Injector {
         if (root == null) return;
         lastRoot = root;
         synchronized (HOSTS) { try { HOSTS.put(root, Boolean.TRUE); } catch (Throwable ignored) {} }
+
+        // 1) 配置优先：先拿到作者设置，绝不让 UI 用默认值画那几秒
         try {
-            data.init(root.getContext());
-            Cfg.maybeReload();
-            ensureReceiver(root.getContext());
+            Cfg.bindContext(root.getContext());
+            Cfg.primeEarly();     // conf 兜底 → 本机副本 → 模块设置（后者覆盖前者）
+        } catch (Throwable ignored) {}
+        log(TAG + " firstDraw size=" + Cfg.size + " mode=" + Cfg.colorMode + " locked=" + Cfg.liveLocked);
+
+        // 2) 立刻挂 overlay 并画第一帧
+        try {
             startTicker();
             ensurePreDraw(root);
             scanAndDraw(root);
         } catch (Throwable t) {
             log(TAG + " scanRoot err " + t);
         }
+
+        // 3) 系统服务查询放到后台：开机阶段 registerReceiver 可阻塞数秒，放在主线程会把首帧拖晚
+        final Context c = root.getContext();
+        WORKER.execute(new Runnable() {
+            @Override public void run() {
+                try { data.init(c); } catch (Throwable ignored) {}
+                try { ensureReceiver(c); } catch (Throwable ignored) {}
+                try { data.refreshFallback(); } catch (Throwable ignored) {}
+                try {
+                    if (handler != null) handler.post(new Runnable() {
+                        @Override public void run() { refreshNow(); }
+                    });
+                } catch (Throwable ignored) {}
+            }
+        });
+    }
+
+    /** 主线程：把当前状态刷到所有宿主上。 */
+    private static void refreshNow() {
+        try {
+            colorRank = -1;
+            for (View r : snapshotRoots()) {
+                try { scanAndDraw(r); } catch (Throwable ignored) {}
+                try { r.invalidate(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable ignored) {}
     }
 
     /** 下拉面板展开状态（诊断用）。 */

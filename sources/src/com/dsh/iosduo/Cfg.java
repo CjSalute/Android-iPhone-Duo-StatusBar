@@ -1,6 +1,8 @@
 package com.dsh.iosduo;
 
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import de.robv.android.xposed.XSharedPreferences;
 
 import java.io.BufferedReader;
@@ -33,6 +35,9 @@ public final class Cfg {
     public static volatile boolean liveLocked = false;
 
     private static final String[] PATHS = {
+            // Android/media/<pkg>/ 对其它应用公开可读，设置页会同步写一份到这里
+            "/storage/emulated/0/Android/media/com.dsh.iosduo/iosduo.conf",
+            "/sdcard/Android/media/com.dsh.iosduo/iosduo.conf",
             "/sdcard/Download/DSH-Go/iosduo.conf",
             "/storage/emulated/0/Download/DSH-Go/iosduo.conf",
             "/sdcard/iosduo.conf",
@@ -41,13 +46,96 @@ public final class Cfg {
 
     private Cfg() {}
 
-    public static void maybeReload() {
-        long now = System.currentTimeMillis();
-        if (now - lastCheck < 300) return;
-        lastCheck = now;
-        if (liveLocked) return; // 已用广播实时值，避免被旧配置覆盖
+    // ------------------------------------------------- 早期加载 / 本机副本缓存
 
-        // 1) 优先读设置 App 写入的 SharedPreferences（XSharedPreferences）
+    private static Context appCtx;
+    private static boolean cacheLoaded = false;
+
+    /**
+     * 进程最早期调用（handleLoadPackage 阶段）：不依赖 Context，
+     * 直接把作者写在模块里的设置读进来。避免 SystemUI 刚起来那几秒用默认值画图。
+     */
+    public static void initEarly() {
+        lastCheck = 0L;
+        // 文件通道不依赖 Context，进程一起来就能拿到参数，首帧不会用默认值
+        try { readConfOnce(); } catch (Throwable ignored) {}
+        try { readXsp(); } catch (Throwable ignored) {}
+    }
+
+    public static void bindContext(Context c) {
+        if (appCtx != null || c == null) return;
+        try {
+            Context a = c.getApplicationContext();
+            appCtx = (a != null) ? a : c;
+        } catch (Throwable t) {
+            appCtx = c;
+        }
+    }
+
+    /** 模块设置读不到时的本机副本（SystemUI 自己的 prefs，读写绝不会失败）。 */
+    public static void loadCache() {
+        if (cacheLoaded) return;
+        cacheLoaded = true;
+        int n = 0;
+        try {
+            if (appCtx != null) {
+                SharedPreferences p = appCtx.getSharedPreferences("iosduo_live", Context.MODE_PRIVATE);
+                java.util.Map<String, ?> all = p.getAll();
+                if (all != null) {
+                    n = all.size();
+                    for (String k : KEYS) {
+                        if (all.containsKey(k)) set(k, p.getFloat(k, 0f));
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            logx("loadCache err " + t);
+        }
+        logx("loadCache ctx=" + (appCtx != null) + " keys=" + n + " size=" + size);
+    }
+
+    private static void logx(String s) {
+        try { de.robv.android.xposed.XposedBridge.log("IOSDuo cfg: " + s); } catch (Throwable ignored) {}
+    }
+
+    private static float cur(String k) {
+        if ("thickness".equals(k)) return thickness;
+        if ("radius".equals(k)) return radius;
+        if ("gap".equals(k)) return gap;
+        if ("size".equals(k)) return size;
+        if ("offsetX".equals(k)) return offsetX;
+        if ("offsetY".equals(k)) return offsetY;
+        if ("colorMode".equals(k)) return colorMode;
+        if ("sigScale".equals(k)) return sigScale;
+        if ("sigDx".equals(k)) return sigDx;
+        if ("sigDy".equals(k)) return sigDy;
+        if ("wifiScale".equals(k)) return wifiScale;
+        if ("wifiDx".equals(k)) return wifiDx;
+        if ("wifiDy".equals(k)) return wifiDy;
+        if ("netScale".equals(k)) return netScale;
+        if ("netDx".equals(k)) return netDx;
+        if ("netDy".equals(k)) return netDy;
+        if ("numScale".equals(k)) return numScale;
+        if ("numDx".equals(k)) return numDx;
+        if ("numDy".equals(k)) return numDy;
+        if ("arcScale".equals(k)) return arcScale;
+        if ("arcDx".equals(k)) return arcDx;
+        if ("arcDy".equals(k)) return arcDy;
+        return 0f;
+    }
+
+    /** 把当前生效值写成本机副本，下次 SystemUI 启动瞬间就能用对参数。 */
+    public static void saveCache() {
+        if (appCtx == null) return;
+        try {
+            SharedPreferences.Editor e = appCtx.getSharedPreferences("iosduo_live", Context.MODE_PRIVATE).edit();
+            for (String k : KEYS) e.putFloat(k, cur(k));
+            e.apply();
+        } catch (Throwable ignored) {}
+    }
+
+    /** 只读 XSharedPreferences，成功返回 true。 */
+    private static boolean readXsp() {
         boolean fromXsp = false;
         try {
             if (xsp == null) xsp = new XSharedPreferences("com.dsh.iosduo", "iosduo");
@@ -76,20 +164,50 @@ public final class Cfg {
             if (xsp.contains("arcDy")) { arcDy = clamp(xsp.getFloat("arcDy", arcDy), -20f, 20f); fromXsp = true; }
             if (xsp.contains("debug")) { debug = xsp.getFloat("debug", debug ? 1f : 0f) > 0.5f; }
         } catch (Throwable ignored) {}
-        if (fromXsp) return;
+        if (!loggedXsp) {
+            loggedXsp = true;
+            logx("readXsp ok=" + fromXsp + " size=" + size + " mode=" + colorMode);
+        }
+        return fromXsp;
+    }
 
-        // 2) 兜底：读 conf 文件
+    private static boolean loggedXsp = false;
+
+    /**
+     * 启动时按“最旧 → 最新”叠加三路来源，保证最后生效的一定是最权威的那份：
+     *   1) conf 文本文件（历史遗留兜底，最旧）
+     *   2) SystemUI 本机副本（上次实际生效值）
+     *   3) 模块设置 XSharedPreferences（作者在设置页里存的值，最权威）
+     */
+    public static void primeEarly() {
+        readConfOnce();
+        loadCache();
+        readXsp();
+    }
+
+    /** 只读一次 conf 文件（历史兜底机制，不再参与运行期覆盖）。 */
+    private static void readConfOnce() {
+        if (confDone) return;
+        confDone = true;
         for (String p : PATHS) {
             try {
                 File f = new File(p);
                 if (!f.exists() || !f.canRead()) continue;
-                long m = f.lastModified();
-                if (m == lastMod) return;
+                lastMod = f.lastModified();
                 parse(f);
-                lastMod = m;
                 return;
             } catch (Throwable ignored) {}
         }
+    }
+
+    private static boolean confDone = false;
+
+    public static void maybeReload() {
+        long now = System.currentTimeMillis();
+        if (now - lastCheck < 300) return;
+        lastCheck = now;
+        if (liveLocked) return; // 已用广播实时值，避免被旧配置覆盖
+        readXsp();
     }
 
     private static void parse(File f) {
@@ -180,5 +298,6 @@ public final class Cfg {
                 try { set(k, it.getFloatExtra(k, 0f)); } catch (Throwable ignored) {}
             }
         }
+        saveCache();   // 立刻落一份本机副本，下次 SystemUI 启动不用等 XSharedPreferences
     }
 }

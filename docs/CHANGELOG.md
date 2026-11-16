@@ -194,4 +194,55 @@ DUMP roots=3 wifi=3 sig=3 net= batt=84 charging color=ff000000 barMode=0 tint=ff
 
 targetSdk 35 → Android 15+ 强制 edge-to-edge，内容会顶到状态栏下面。改为用 `setOnApplyWindowInsetsListener` 拿真实 `WindowInsets.Type.statusBars().top`，再额外 +24dp 下移（低版本回退 `getSystemWindowInsetTop()`，再回退 dimen `status_bar_height`）。「图标颜色」卡片的上边框不再被遮。
 
+---
+
+# v2.7-rb 增补（软重启后参数丢失 5–10 秒）
+
+## 现象
+
+软重启（重启 SystemUI 或整机开机）后，三合一组件先用**默认大小**画出来，5–10 秒后才变回用户设置。
+
+## 根因（三条叠加，全部实测确认）
+
+**1. Android 16 把 app 的 SharedPreferences 挪进了 `/data/misc/apexdata/`**
+
+```
+/data/misc/apexdata/044de72f-14c0-41f7-a261-0066aa6b1565/prefs/com.dsh.iosduo/iosduo.xml
+-rw-rw---- u0_a416 u0_a416      ← 只有模块自己和它的组能读
+```
+
+`XSharedPreferences` 按老路径 `/data/user_de/0/com.dsh.iosduo/shared_prefs/iosduo.xml` 找，**目录根本不存在**，于是每次都读空 → 永远用 `Cfg` 的默认值（size=26）。诊断日志实锤：
+
+```
+IOSDuo cfg: readXsp ok=false size=26.0 mode=0
+```
+
+**2. 遗留的 conf 文件在运行期反向覆盖**
+
+`/sdcard/Download/DSH-Go/iosduo.conf` 里写着 `size=26`，旧逻辑把它放在 cache 之后读取，把正确的 23 又改回 26。已改为「conf 只作启动最旧兜底」，并把该文件改名为 `.bak`。
+
+**3. `scanRoot` 到首次绘制之间还夹着系统服务查询**
+
+`data.init()`（`registerReceiver(null, BATTERY_CHANGED)`）与 `ensureReceiver()`（注册自己的广播接收器）在开机阶段会被 ActivityManager 卡住 —— 实测从进程启动到 `scanRoot` 耗时 4–10 秒（`04:16:20.074 → firstDraw 04:16:23.710`）。
+
+## 修法
+
+- **配置三路叠加，顺序固定为「最旧 → 最权威」**：conf 文本（历史兜底）→ SystemUI 本机副本 → XSharedPreferences。
+- **新增 SystemUI 本机副本**：设置页每次下发参数时，`Cfg.saveCache()` 把全量写进 SystemUI 自己的 `shared_prefs/iosduo_live.xml`（`u0_a40` 自己读写，绝不会失败）。下次启动 `Cfg.loadCache()` 瞬间还原。
+- **新增公共文件通道**：设置页同时写 `/sdcard/Android/media/com.dsh.iosduo/iosduo.conf`（`Android/media/<pkg>` 是少数「自己无需权限就能写、其它进程能读」的位置）。副本被清掉也能恢复。
+- **`Cfg.initEarly()` 提前到 `handleLoadPackage`**：文件通道不依赖 Context，**进程起来 5 毫秒**就能拿到正确参数。
+- **`data.init` / `ensureReceiver` / `refreshFallback` 全部挪到后台线程**，主线程只负责绘制，不再被系统服务查询拖慢首帧。
+
+## 实测（`--ef size 23` 为用户值，副本已删除的极限场景）
+
+```
+04:39:12.615  IOSDuo v2.7-rb loaded in com.android.systemui
+04:39:12.620  IOSDuo cfg: readXsp ok=false size=23.0 mode=2   ← 进程起来 5ms 就是用户值
+04:39:15.506  IOSDuo cfg: loadCache ctx=true keys=0 size=23.0 ← 副本是空的也不影响
+04:39:15.507  IOSDuo firstDraw size=23.0 mode=2 locked=false  ← 首帧 23，不再是 26
+```
+
+修复前后对比：修复前首帧 `size=26.0`（默认值），现在首帧就是 `size=23.0`。
+
+
 

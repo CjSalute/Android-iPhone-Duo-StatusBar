@@ -24,7 +24,7 @@ import java.lang.reflect.Method;
 public class Module implements IXposedHookLoadPackage {
 
     static final String TAG = "IOSDuo";
-    static final String VER = "2.5-rb";
+    static final String VER = "2.7-rb";
 
     private static final String[] MOBILE = {
             "com.android.systemui.statusbar.pipeline.mobile.ui.view.ModernStatusBarMobileView",
@@ -66,6 +66,10 @@ public class Module implements IXposedHookLoadPackage {
         if (lp == null || lp.packageName == null) return;
         if (!"com.android.systemui".equals(lp.packageName)) return;
         XposedBridge.log(TAG + " v" + VER + " loaded in " + lp.processName);
+
+        // Process 起来的第一时间就把作者设置读进来（不依赖 Context），
+        // 否则 SystemUI 首批绘制的几秒会用默认参数。
+        try { Cfg.initEarly(); } catch (Throwable ignored) {}
 
         for (String s : MOBILE) hookState(lp.classLoader, s, false);
         for (String s : WIFI) hookState(lp.classLoader, s, true);

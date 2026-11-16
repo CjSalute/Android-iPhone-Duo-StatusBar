@@ -318,6 +318,7 @@ public class SettingsActivity extends Activity {
             sendBroadcast(it);
         } catch (Throwable ignored) {}
         pending.clear();
+        writeMediaConf();
     }
 
     /** 广播全部参数给 SystemUI，实时生效。 */
@@ -328,6 +329,29 @@ public class SettingsActivity extends Activity {
             for (String k : Cfg.KEYS) it.putExtra(k, sp.getFloat(k, def(k)));
             sendBroadcast(it);
         } catch (Throwable ignored) {}
+        writeMediaConf();
+    }
+
+    /**
+     * 再写一份到 /sdcard/Android/media/com.dsh.iosduo/iosduo.conf。
+     * Android 16 把 app 的 SharedPreferences 挪到了 /data/misc/apexdata（其它进程读不到），
+     * XSharedPreferences 因此失效；这个目录是少数“别人能读、自己不用权限就能写”的位置。
+     */
+    private void writeMediaConf() {
+        java.io.FileOutputStream fos = null;
+        try {
+            java.io.File dir = new java.io.File("/sdcard/Android/media/com.dsh.iosduo");
+            if (!dir.exists()) dir.mkdirs();
+            StringBuilder sb = new StringBuilder();
+            sb.append("# IOSDuo params (auto-generated, do not edit)\n");
+            for (String k : Cfg.KEYS) sb.append(k).append('=').append(sp.getFloat(k, def(k))).append('\n');
+            fos = new java.io.FileOutputStream(new java.io.File(dir, "iosduo.conf"));
+            fos.write(sb.toString().getBytes("UTF-8"));
+            fos.flush();
+        } catch (Throwable ignored) {
+        } finally {
+            try { if (fos != null) fos.close(); } catch (Throwable ignored) {}
+        }
     }
 
     private float def(String key) {
