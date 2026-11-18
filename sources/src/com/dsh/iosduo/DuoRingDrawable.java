@@ -32,6 +32,14 @@ public class DuoRingDrawable extends Drawable {
     private final Paint net = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF oval = new RectF();
     private final RectF tmp = new RectF();
+    private final android.graphics.Path airPath = new android.graphics.Path();
+    private final Paint airFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint airStroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    /** 让位（另一宿主正在画）时置 true：画布上什么也不输出，但 overlay 仍在，重绘即清空旧像素。 */
+    private volatile boolean hidden = false;
+
+    public void setHidden(boolean h) { hidden = h; }
 
     public DuoRingDrawable(StatusData d, float density) {
         this.data = d;
@@ -47,6 +55,7 @@ public class DuoRingDrawable extends Drawable {
     }
 
     @Override public void draw(Canvas cv) {
+        if (hidden) return;
         Rect b = getBounds();
         float S = Math.min(b.width(), b.height());
         if (S <= 0) return;
@@ -90,28 +99,34 @@ public class DuoRingDrawable extends Drawable {
         if (segR > 0f) cv.drawArc(oval, arcR0, segR, false, fill);
 
         // ---- 信号点（大小/偏移可调；填充方向与电池弧一致：从左下方开始点亮）----
-        float dr = S * 0.055f * Cfg.sigScale;
-        int lvl = Math.max(0, Math.min(SIG_ANGLES.length, data.signal));
-        float scx = acx + Cfg.sigDx * dens;
-        float scy = acy + Cfg.sigDy * dens;
-        int litFrom = SIG_ANGLES.length - lvl;   // 信号弱时只亮最左那个，与弧线的“从左起充”同向
-        for (int i = 0; i < SIG_ANGLES.length; i++) {
-            double a = Math.toRadians(SIG_ANGLES[i]);
-            float x = scx + (float) (R * Math.cos(a));
-            float y = scy + (float) (R * Math.sin(a));
-            dots.setColor(i >= litFrom ? base : withAlpha(base, 0x55));
-            cv.drawCircle(x, y, dr, dots);
+        boolean air = data.airplaneMode;
+        if (!air) {
+            float dr = S * 0.055f * Cfg.sigScale;
+            int lvl = Math.max(0, Math.min(SIG_ANGLES.length, data.signal));
+            float scx = acx + Cfg.sigDx * dens;
+            float scy = acy + Cfg.sigDy * dens;
+            int litFrom = SIG_ANGLES.length - lvl;   // 信号弱时只亮最左那个，与弧线的“从左起充”同向
+            for (int i = 0; i < SIG_ANGLES.length; i++) {
+                double a = Math.toRadians(SIG_ANGLES[i]);
+                float x = scx + (float) (R * Math.cos(a));
+                float y = scy + (float) (R * Math.sin(a));
+                dots.setColor(i >= litFrom ? base : withAlpha(base, 0x55));
+                cv.drawCircle(x, y, dr, dots);
+            }
         }
 
         // ---- WiFi / 5G 互斥：同一位置二选一，尺寸对齐 ----
-        boolean wifiOn = data.wifi >= 0;
+        boolean wifiOn = !air && data.wifi >= 0;
         String nt = data.netType;
-        boolean hasNet = nt != null && nt.length() > 0;
+        boolean hasNet = !air && nt != null && nt.length() > 0;
 
         float wcx = cx + Cfg.wifiDx * dens;
         float wcy = cy + S * 0.085f + Cfg.wifiDy * dens;
 
-        if (wifiOn) {
+        if (air) {
+            // 飞行模式：WiFi / 4G / 5G 全部隐藏，改成彩色飞机（机头朝右 + 持续旋转）
+            drawAirplane(cv, wcx, wcy, S * 0.46f);
+        } else if (wifiOn) {
             float ws = Cfg.wifiScale;
             wifi.setColor(base);
             float[] fanRad = {S * 0.095f, S * 0.175f, S * 0.255f};
@@ -136,6 +151,59 @@ public class DuoRingDrawable extends Drawable {
         float ts = S * 0.19f * Cfg.numScale;
         text.setTextSize(ts); text.setColor(col);
         cv.drawText(String.valueOf(batt), acx + Cfg.numDx * dens, acy - R + ts * 0.55f + Cfg.numDy * dens, text);
+    }
+
+    /**
+     * 飞行模式图标：彩色飞机，机头朝右，持续自转。
+     * 角度取 SystemClock.uptimeMillis()，所以只要外部按 ~60ms 重绘一次就会连续转动。
+     */
+    private void drawAirplane(Canvas cv, float cx, float cy, float S) {
+        if (S <= 0f) return;
+        float t = (android.os.SystemClock.uptimeMillis() % 1800L) / 1800f;
+        float ang = t * 360f;
+        float u = S * 0.5f;
+
+        cv.save();
+        cv.rotate(ang, cx, cy);
+
+        airPath.reset();
+        // 机身（机头在右）
+        airPath.moveTo(cx + u * 0.94f, cy);
+        airPath.lineTo(cx + u * 0.22f, cy - u * 0.085f);
+        airPath.lineTo(cx - u * 0.60f, cy - u * 0.085f);
+        airPath.lineTo(cx - u * 0.86f, cy - u * 0.24f);
+        airPath.lineTo(cx - u * 0.72f, cy);
+        airPath.lineTo(cx - u * 0.86f, cy + u * 0.24f);
+        airPath.lineTo(cx - u * 0.60f, cy + u * 0.085f);
+        airPath.lineTo(cx + u * 0.22f, cy + u * 0.085f);
+        airPath.close();
+        // 上翼（后掠）
+        float wx = cx - u * 0.08f;
+        airPath.moveTo(wx + u * 0.24f, cy - u * 0.06f);
+        airPath.quadTo(wx - u * 0.18f, cy - u * 0.50f, wx - u * 0.50f, cy - u * 0.82f);
+        airPath.quadTo(wx - u * 0.24f, cy - u * 0.36f, wx - u * 0.08f, cy - u * 0.06f);
+        airPath.close();
+        // 下翼
+        airPath.moveTo(wx + u * 0.24f, cy + u * 0.06f);
+        airPath.quadTo(wx - u * 0.18f, cy + u * 0.50f, wx - u * 0.50f, cy + u * 0.82f);
+        airPath.quadTo(wx - u * 0.24f, cy + u * 0.36f, wx - u * 0.08f, cy + u * 0.06f);
+        airPath.close();
+
+        airFill.setStyle(Paint.Style.FILL);
+        airFill.setShader(new android.graphics.LinearGradient(
+                cx - u, cy - u, cx + u, cy + u,
+                new int[]{0xFF7BE8FF, 0xFF3B9CFF, 0xFF2A55D8},
+                new float[]{0f, 0.55f, 1f},
+                android.graphics.Shader.TileMode.CLAMP));
+        cv.drawPath(airPath, airFill);
+        airFill.setShader(null);
+
+        airStroke.setStyle(Paint.Style.STROKE);
+        airStroke.setStrokeWidth(Math.max(1f, S * 0.05f));
+        airStroke.setColor(0x88FFFFFF);
+        cv.drawPath(airPath, airStroke);
+
+        cv.restore();
     }
 
     private static int withAlpha(int color, int alpha) {

@@ -72,13 +72,16 @@ public final class Injector {
                     if ((tickCount % 2) == 0) WORKER.execute(REFRESH);
                     ArrayList<View> roots = snapshotRoots();
                     colorRank = -1;
+                    // 飞行模式下飞机要转起来，tick 加快到 60ms，全扫频率相应放稀
+                    int fullEvery = data.airplaneMode ? 10 : 5;
                     for (View r : roots) {
-                        if ((tickCount % 5) == 0) scanAndDraw(r);
+                        if ((tickCount % fullEvery) == 0) scanAndDraw(r);
                         else { DuoRingDrawable d = OVL.get(r); if (d != null) d.invalidateSelf(); }
                     }
                     tickCount++;
                 } catch (Throwable ignored) {}
-                if (handler != null) handler.postDelayed(this, 250);
+                int delay = data.airplaneMode ? 60 : 250;
+                if (handler != null) handler.postDelayed(this, delay);
             }
         }, 500);
     }
@@ -337,6 +340,14 @@ public final class Injector {
         while (!q.isEmpty() && n < 4000) {
             View v = q.poll(); n++;
             boolean target = isHiddenClass(v) || looksLikeIcon(v);
+            // 有些图标类名不带 wifi/mobile（如 SingleBindableStatusBarIconView + slot=satellite），
+            // 只能靠 slot 字段识别
+            if (!target) {
+                String cn0 = v.getClass().getSimpleName();
+                if (cn0.contains("Icon") || cn0.contains("Battery") || cn0.contains("Status")) {
+                    if (isHiddenSlot(readString(v, "mSlot", "slot"))) target = true;
+                }
+            }
             boolean netText = (!target && isNetText(v, root));
             if (target || netText) {
                 int vx = 0, vy = 0, vw = 0, vh = 0;
@@ -369,15 +380,15 @@ public final class Injector {
                 for (int k = 0; k < c; k++) q.add(g.getChildAt(k));
             }
         }
+        // 只让当前唯一该画的宿主持有 overlay；其余宿主先把 overlay 摘掉，彻底杜绝重影/残留
+        if (!canDrawHere(root)) { ovlDrop(root); return; }
+
         if (!any) return;
 
         updateColor(root);
-
-        // 只让当前唯一该画的宿主持有 overlay；其余宿主把 overlay 摘掉，彻底杜绝重影
-        if (!canDrawHere(root)) { ovlDrop(root); return; }
-
         DuoRingDrawable d = ovlFor(root);
         if (d == null) return;
+        d.setHidden(false);
 
         if (r > l && b > t) {
             float dens = root.getResources().getDisplayMetrics().density;
@@ -427,24 +438,25 @@ public final class Injector {
 
     // ------------------------------------------------------------------ overlay
 
-    /** 内层状态栏视图已经可见并挂了 overlay 时，外层根不要再画（避免重影叠色）。 */
+    /**
+     * 全局只允许一个宿主持有可见 overlay。判定只依据“谁真的在屏幕上”，
+     * 不依赖 OVL 当前状态 —— 否则逐个 root 判断会在 drop 过程中互相影响，产生残留。
+     */
     private static boolean canDrawHere(View root) {
+        View w = pickWinner();
+        return w == null || w == root;
+    }
+
+    /** 锁屏时 KeyguardStatusBarView 独占；平时按宿主优先级取第一个真正可见的。 */
+    private static View pickWinner() {
         ArrayList<View> roots = snapshotRoots();
-        // 锁屏：KeyguardStatusBarView 可见时它独占，其他宿主一律让位（否则锁屏重影）
-        View kg = null;
         for (View v : roots) {
-            if (v.getClass().getSimpleName().contains("KeyguardStatusBarView") && reallyVisible(v)) {
-                kg = v;
-                break;
-            }
+            if (v.getClass().getSimpleName().contains("KeyguardStatusBarView") && reallyVisible(v)) return v;
         }
-        if (kg != null) return root == kg;
-        // 非锁屏：按宿主优先级，最高的那个可见者画
-        for (View other : roots) {
-            if (other == root) return true;
-            if (reallyVisible(other)) return false;
+        for (View v : roots) {
+            if (reallyVisible(v)) return v;
         }
-        return true;
+        return null;
     }
 
     private static boolean reallyVisible(View v) {
@@ -460,11 +472,17 @@ public final class Injector {
         return true;
     }
 
+    /**
+     * 让位：不移除 overlay（移除后宿主若没重绘，屏幕上会残留最后一帧），
+     * 而是把 drawable 标记成 hidden 并立刻重绘一次，旧像素当场被清掉。
+     */
     private static void ovlDrop(View root) {
         synchronized (OVL) {
-            DuoRingDrawable d = OVL.remove(root);
+            DuoRingDrawable d = OVL.get(root);
             if (d != null) {
-                try { root.getOverlay().remove(d); } catch (Throwable ignored) {}
+                d.setHidden(true);
+                try { d.invalidateSelf(); } catch (Throwable ignored) {}
+                try { root.invalidate(); } catch (Throwable ignored) {}
             }
         }
     }
@@ -537,7 +555,7 @@ public final class Injector {
             String cn = v.getClass().getSimpleName().toLowerCase();
             return cn.contains("mobile") || cn.contains("wifi") || cn.contains("wlan")
                     || cn.contains("signal") || cn.contains("battery") || cn.contains("cellular")
-                    || cn.contains("sim") || cn.contains("airplane");
+                    || cn.contains("sim") || cn.contains("airplane") || cn.contains("satellite");
         } catch (Throwable ignored) {}
         return false;
     }
@@ -551,7 +569,7 @@ public final class Injector {
                 || s.contains("data") || s.contains("activity")
                 || s.contains("5g") || s.contains("4g") || s.contains("lte") || s.contains("nr")
                 || s.contains("roam") || s.contains("volte") || s.contains("vowifi")
-                || s.contains("sim") || s.contains("airplane");
+                || s.contains("sim") || s.contains("airplane") || s.contains("satellite");
     }
 
     private static String slotOf(View v, Object[] args) {

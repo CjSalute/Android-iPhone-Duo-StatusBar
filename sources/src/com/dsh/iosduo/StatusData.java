@@ -27,6 +27,7 @@ public class StatusData {
     public volatile int signal = -1;         // 0..4
     public volatile int color = 0;           // 0=未捕获
     public volatile String netType = "";     // 5G/4G/3G/2G，WiFi 已连时强制为空
+    public volatile boolean airplaneMode = false;  // 飞行模式：隐藏 WiFi/4G/5G，改为显示旋转飞机
 
     public volatile int descWifi = -1;       // 从 contentDescription 解析到的兜底值
     public volatile int descSignal = -1;
@@ -63,6 +64,12 @@ public class StatusData {
         if (now - lastQuery < 600) return;
         lastQuery = now;
 
+        // 0) 飞行模式：全局开关，开了就隐藏一切网络图标
+        try {
+            airplaneMode = android.provider.Settings.Global.getInt(
+                    ctx.getContentResolver(), android.provider.Settings.Global.AIRPLANE_MODE_ON, 0) == 1;
+        } catch (Throwable ignored) {}
+
         boolean wifiConnected = false;
         int wifiLevel = -1;
 
@@ -97,7 +104,11 @@ public class StatusData {
             }
         } catch (Throwable ignored) {}
 
-        if (wifiConnected) {
+        if (airplaneMode) {
+            wifi = -1;
+            netType = "";
+            signal = 0;
+        } else if (wifiConnected) {
             if (wifiLevel < 0) wifiLevel = (descWifi >= 0 ? descWifi : 3);
             wifi = Math.max(0, Math.min(4, wifiLevel));
         } else {
@@ -120,10 +131,17 @@ public class StatusData {
                     if (ty instanceof Integer) nt = mapNet((Integer) ty);
                 } catch (Throwable ignored) {}
                 if (nt.length() == 0 && descSignal >= 0) nt = netType;
-                // WiFi 连接时强制清空，避免 “WiFi 图标 + 5G” 同时出现
-                netType = wifiConnected ? "" : nt;
+                // WiFi 连接时强制清空，避免 “WiFi 图标 + 5G” 同时出现；飞行模式下一律清空
+                netType = (wifiConnected || airplaneMode) ? "" : nt;
             }
         } catch (Throwable ignored) {}
+
+        // 飞行模式最终裁决：任何网络标识都不允许残留
+        if (airplaneMode) {
+            wifi = -1;
+            signal = 0;
+            netType = "";
+        }
     }
 
     static String mapNet(int t) {

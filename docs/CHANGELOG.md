@@ -244,5 +244,39 @@ IOSDuo cfg: readXsp ok=false size=26.0 mode=0
 
 修复前后对比：修复前首帧 `size=26.0`（默认值），现在首帧就是 `size=23.0`。
 
+---
+
+# v2.8-rb 增补（飞行模式）
+
+## 需求
+
+飞行模式开启时不再显示 WiFi / 4G / 5G，改为一个彩色飞机图标（机头朝右），并持续自转提示「正在飞行模式」。
+
+## 实现
+
+- `StatusData` 新增 `airplaneMode`，每 600ms 读 `Settings.Global.AIRPLANE_MODE_ON`；为 `true` 时强制 `wifi=-1 / signal=0 / netType=""`，保证任何网络标识都不残留。
+- `DuoRingDrawable`：飞行模式下跳过信号点与 WiFi/5G 绘制，改为调用 `drawAirplane()` —— 自己用 `Path` 画的飞机（机身 + 后掠双翼），**机头朝 +x（右）**，填充 `LinearGradient(#7BE8FF → #3B9CFF → #2A55D8)` 三色渐变 + 白色描边，即彩色。
+- 旋转角度取 `SystemClock.uptimeMillis() % 1800 / 1800 * 360`，**1.8 秒一圈**；ticker 在飞行模式下把刷新间隔从 250ms 提速到 **60ms**（全扫频率同步放稀到每 10 tick），保证转动顺滑。
+- 原生飞行模式图标（类名含 `airplane`）依旧被隐藏，由组件内的动画飞机接管，位置沿用状态栏右侧图标区。
+
+## 顺带修掉的两个问题
+
+**1. 关闭飞行模式后屏幕上残留最后一帧图案**
+
+原来让位（有更高优先级宿主在画）时是 `ViewOverlay.remove(drawable)` —— 移除后宿主如果不重绘，屏幕上会留着最后一帧的像素。改成「不移除，只把 drawable 标记 `hidden` 并立即 `invalidateSelf()`」，重绘即清空。
+
+**2. 宿主选择逻辑各自为政**
+
+`canDrawHere` 原本对每个 root 单独遍历一遍判断，遍历过程中 `ovlDrop` 会改动 OVL 状态，导致同一次扫描里各 root 的结论互相矛盾（出现两个宿主同时画）。抽成 `pickWinner()`：先定唯一绘制者（锁屏时 Keyguard 独占，否则按宿主优先级取第一个 `reallyVisible` 的），其余全部让位。
+
+**3. 漏网的 `slot=satellite` 图标**
+
+有些图标类名不带 wifi/mobile（如 `SingleBindableStatusBarIconView slot=satellite`），原来只按类名和 contentDescription 匹配会漏掉。`scanAndDraw` 增加一条：类名含 `Icon/Battery/Status` 时再读 `mSlot/slot` 字段，命中隐藏名单也隐藏。
+
+## 实测
+
+飞行模式开 `DUMP` → `wifi=-1 sig=0 net=(空)`，组件内显示彩色飞机；连拍两帧飞机角度不同（在转）。关闭后 WiFi 与信号点正常恢复。
+
+
 
 

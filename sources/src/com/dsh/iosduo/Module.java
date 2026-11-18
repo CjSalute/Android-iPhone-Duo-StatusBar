@@ -24,7 +24,7 @@ import java.lang.reflect.Method;
 public class Module implements IXposedHookLoadPackage {
 
     static final String TAG = "IOSDuo";
-    static final String VER = "2.7-rb";
+    static final String VER = "2.8-rb";
 
     private static final String[] MOBILE = {
             "com.android.systemui.statusbar.pipeline.mobile.ui.view.ModernStatusBarMobileView",
